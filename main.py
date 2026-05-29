@@ -1,1 +1,140 @@
 
+import feedparser
+import firebase_admin
+from firebase_admin import credentials, firestore, messaging
+import schedule
+import time
+import hashlib
+import json
+import os
+from datetime import datetime
+
+# Firebase Setup
+firebase_key = os.environ.get("FIREBASE_KEY", "")
+if firebase_key:
+    key_dict = json.loads(firebase_key)
+    cred = credentials.Certificate(key_dict)
+else:
+    cred = credentials.Certificate("serviceAccountKey.json")
+
+firebase_admin.initialize_app(cred)
+db = firestore.client()
+print("✅ Firebase connected!")
+
+def generate_id(title):
+    return hashlib.md5(title.encode('utf-8')).hexdigest()
+
+def is_duplicate(job_id):
+    try:
+        doc = db.collection("jobs").document(job_id).get()
+        return doc.exists
+    except:
+        return False
+
+def save_job(title, organization, category, deadline, image_url="", pdf_url="", apply_link="", source=""):
+    if not title or len(title) < 5:
+        return False
+    job_id = generate_id(title)
+    if is_duplicate(job_id):
+        print(f"⏭️  Already exists: {title[:40]}")
+        return False
+    job_data = {
+        "title": title,
+        "organization": organization,
+        "category": category,
+        "deadline": deadline,
+        "imageUrl": image_url,
+        "pdfUrl": pdf_url,
+        "applyLink": apply_link,
+        "source": source,
+        "publishDate": datetime.now().strftime("%Y-%m-%d"),
+        "timestamp": int(datetime.now().timestamp()),
+    }
+    try:
+        db.collection("jobs").document(job_id).set(job_data)
+        print(f"✅ Saved: {title[:55]}")
+        send_notification(title)
+        return True
+    except Exception as e:
+        print(f"❌ Save error: {e}")
+        return False
+
+def send_notification(title):
+    try:
+        message = messaging.Message(
+            notification=messaging.Notification(
+                title="নতুন চাকরি! 🎉",
+                body=f"{title[:60]}"
+            ),
+            topic="all_jobs",
+        )
+        messaging.send(message)
+        print(f"🔔 Notification sent!")
+    except Exception as e:
+        print(f"❌ Notification error: {e}")
+
+def get_category(title, default):
+    t = title.lower()
+    if any(w in t for w in ["bank", "ব্যাংক", "banking"]):
+        return "ব্যাংক"
+    elif any(w in t for w in ["ngo", "brac", "grameen"]):
+        return "NGO"
+    elif any(w in t for w in ["সরকারি", "govt", "ministry", "মন্ত্রণালয়", "অধিদপ্তর", "bcs", "psc", "পুলিশ"]):
+        return "সরকারি"
+    return default
+
+RSS_FEEDS = [
+    {"url": "https://www.bdgovtjob.net/feed/", "default_category": "সরকারি", "source": "bdgovtjob.net"},
+    {"url": "https://ejobsbd.com/feed/", "default_category": "বেসরকারি", "source": "ejobsbd.com"},
+    {"url": "https://ejobsbd.com/category/government-job/feed/", "default_category": "সরকারি", "source": "ejobsbd.com"},
+    {"url": "https://ejobsbd.com/category/bank-job/feed/", "default_category": "ব্যাংক", "source": "ejobsbd.com"},
+    {"url": "https://ejobsbd.com/category/ngo-job/feed/", "default_category": "NGO", "source": "ejobsbd.com"},
+    {"url": "https://ejobsbd.com/category/private-job/feed/", "default_category": "বেসরকারি", "source": "ejobsbd.com"},
+    {"url": "https://bdjobstoday.info/feed/", "default_category": "বেসরকারি", "source": "bdjobstoday.info"},
+    {"url": "https://jobbd24.com/feed/", "default_category": "বেসরকারি", "source": "jobbd24.com"},
+]
+
+def scrape_rss_feeds():
+    print("\n📡 RSS Feed Scraping...")
+    total = 0
+    for feed_info in RSS_FEEDS:
+        try:
+            feed = feedparser.parse(feed_info["url"])
+            if not feed.entries:
+                print(f"   ⚠️  No data: {feed_info['source']}")
+                continue
+            print(f"   📡 {feed_info['source']}: {len(feed.entries)} entries")
+            for entry in feed.entries[:15]:
+                title = entry.get("title", "").strip()
+                if not title or len(title) < 5:
+                    continue
+                apply_link = entry.get("link", "")
+                category = get_category(title, feed_info["default_category"])
+                image_url = ""
+                if hasattr(entry, "media_content"):
+                    media = entry.get("media_content", [])
+                    if media:
+                        image_url = media[0].get("url", "")
+                if save_job(title, "বিভিন্ন প্রতিষ্ঠান", category, "N/A", image_url, "", apply_link, feed_info["source"]):
+                    total += 1
+        except Exception as e:
+            print(f"   ❌ {feed_info['source']}: {str(e)[:50]}")
+        time.sleep(1)
+    print(f"   ✅ Total saved: {total}")
+    return total
+
+def run_all_scrapers():
+    print(f"\n{'='*50}")
+    print(f"🚀 Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*50}")
+    total = scrape_rss_feeds()
+    print(f"\n🎉 Done! Total: {total} jobs saved!")
+    print(f"{'='*50}\n")
+
+if __name__ == "__main__":
+    run_all_scrapers()
+    schedule.every(6).hours.do(run_all_scrapers)
+    print("⏰ Scheduler running — প্রতি ৬ ঘণ্টায় update হবে...")
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
