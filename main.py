@@ -2,8 +2,6 @@
 import feedparser
 import firebase_admin
 from firebase_admin import credentials, firestore, messaging
-import schedule
-import time
 import hashlib
 import json
 import os
@@ -133,8 +131,4 @@ def run_all_scrapers():
 
 if __name__ == "__main__":
     run_all_scrapers()
-    schedule.every(6).hours.do(run_all_scrapers)
-    print("⏰ Scheduler running — প্রতি ৬ ঘণ্টায় update হবে...")
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
+    
