@@ -1,4 +1,3 @@
-
 import feedparser
 import firebase_admin
 from firebase_admin import credentials, firestore, messaging
@@ -6,6 +5,7 @@ import hashlib
 import time
 import json
 import os
+import re
 from datetime import datetime
 
 # Firebase Setup
@@ -30,6 +30,56 @@ def is_duplicate(job_id):
     except:
         return False
 
+def extract_image_from_entry(entry):
+    """
+    RSS entry থেকে image URL বের করার ৪টা fallback method
+    """
+    image_url = ""
+
+    # Method 1: media:content বা media:thumbnail
+    if hasattr(entry, "media_content") and entry.media_content:
+        image_url = entry.media_content[0].get("url", "")
+        if image_url:
+            return image_url
+
+    if hasattr(entry, "media_thumbnail") and entry.media_thumbnail:
+        image_url = entry.media_thumbnail[0].get("url", "")
+        if image_url:
+            return image_url
+
+    # Method 2: enclosure (podcast/image attachment)
+    if hasattr(entry, "enclosures") and entry.enclosures:
+        for enc in entry.enclosures:
+            if enc.get("type", "").startswith("image"):
+                image_url = enc.get("href", "") or enc.get("url", "")
+                if image_url:
+                    return image_url
+
+    # Method 3: summary বা content এর HTML থেকে <img> tag extract
+    html_content = ""
+    if hasattr(entry, "content") and entry.content:
+        html_content = entry.content[0].get("value", "")
+    elif hasattr(entry, "summary"):
+        html_content = entry.summary or ""
+
+    if html_content:
+        img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', html_content)
+        if img_match:
+            image_url = img_match.group(1)
+            # data:image বা ছোট icon বাদ দাও
+            if image_url and not image_url.startswith("data:") and len(image_url) > 10:
+                return image_url
+
+    # Method 4: links এর মধ্যে image type খোঁজো
+    if hasattr(entry, "links"):
+        for link in entry.links:
+            if link.get("type", "").startswith("image"):
+                image_url = link.get("href", "")
+                if image_url:
+                    return image_url
+
+    return ""
+
 def save_job(title, organization, category, deadline, image_url="", pdf_url="", apply_link="", source=""):
     if not title or len(title) < 5:
         return False
@@ -51,7 +101,8 @@ def save_job(title, organization, category, deadline, image_url="", pdf_url="", 
     }
     try:
         db.collection("jobs").document(job_id).set(job_data)
-        print(f"✅ Saved: {title[:55]}")
+        img_status = "🖼️" if image_url else "📄"
+        print(f"✅ {img_status} Saved: {title[:50]}")
         send_notification(title)
         return True
     except Exception as e:
@@ -96,6 +147,7 @@ RSS_FEEDS = [
 def scrape_rss_feeds():
     print("\n📡 RSS Feed Scraping...")
     total = 0
+    img_found = 0
     for feed_info in RSS_FEEDS:
         try:
             feed = feedparser.parse(feed_info["url"])
@@ -109,17 +161,18 @@ def scrape_rss_feeds():
                     continue
                 apply_link = entry.get("link", "")
                 category = get_category(title, feed_info["default_category"])
-                image_url = ""
-                if hasattr(entry, "media_content"):
-                    media = entry.get("media_content", [])
-                    if media:
-                        image_url = media[0].get("url", "")
+
+                # ✅ নতুন image extract function
+                image_url = extract_image_from_entry(entry)
+                if image_url:
+                    img_found += 1
+
                 if save_job(title, "বিভিন্ন প্রতিষ্ঠান", category, "N/A", image_url, "", apply_link, feed_info["source"]):
                     total += 1
         except Exception as e:
             print(f"   ❌ {feed_info['source']}: {str(e)[:50]}")
         time.sleep(1)
-    print(f"   ✅ Total saved: {total}")
+    print(f"   ✅ Total saved: {total} | 🖼️ With image: {img_found}")
     return total
 
 def run_all_scrapers():
@@ -132,4 +185,3 @@ def run_all_scrapers():
 
 if __name__ == "__main__":
     run_all_scrapers()
-    
