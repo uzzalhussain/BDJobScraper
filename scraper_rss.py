@@ -1,261 +1,259 @@
-import feedparser
-import firebase_admin
-from firebase_admin import credentials, firestore, messaging
-import schedule
+import os
 import time
-import hashlib
+import requests
+import firebase_admin
+from firebase_admin import credentials, firestore
+from bs4 import BeautifulSoup
+import feedparser
+import json
+import re
 from datetime import datetime
 
-# ========================================
-# Firebase Setup
-# ========================================
-cred = credentials.Certificate("serviceAccountKey.json")
-firebase_admin.initialize_app(cred)
+# ─── Firebase Init ────────────────────────────────────────────────────────────
+firebase_key = os.environ.get("FIREBASE_KEY")
+if firebase_key:
+    key_dict = json.loads(firebase_key)
+    cred = credentials.Certificate(key_dict)
+else:
+    cred = credentials.Certificate("firebase_key.json")
+
+if not firebase_admin._apps:
+    firebase_admin.initialize_app(cred)
+
 db = firestore.client()
-print("✅ Firebase connected!")
 
-# ========================================
-# Helper Functions
-# ========================================
-def generate_id(title):
-    return hashlib.md5(title.encode('utf-8')).hexdigest()
-
-def is_duplicate(job_id):
-    try:
-        doc = db.collection("jobs").document(job_id).get()
-        return doc.exists
-    except:
-        return False
-
-def save_job(title, organization, category, deadline,
-             image_url="", pdf_url="", apply_link="", source=""):
-    if not title or len(title) < 5:
-        return False
-
-    job_id = generate_id(title)
-
-    if is_duplicate(job_id):
-        print(f"⏭️  Already exists: {title[:40]}")
-        return False
-
-    job_data = {
-        "title": title,
-        "organization": organization,
-        "category": category,
-        "deadline": deadline,
-        "imageUrl": image_url,
-        "pdfUrl": pdf_url,
-        "applyLink": apply_link,
-        "source": source,
-        "publishDate": datetime.now().strftime("%Y-%m-%d"),
-        "timestamp": int(datetime.now().timestamp()),
-    }
-
-    try:
-        db.collection("jobs").document(job_id).set(job_data)
-        print(f"✅ Saved: {title[:55]}")
-        send_notification(title, organization)
-        return True
-    except Exception as e:
-        print(f"❌ Save error: {e}")
-        return False
-
-def send_notification(title, organization):
-    try:
-        message = messaging.Message(
-            notification=messaging.Notification(
-                title="নতুন চাকরি! 🎉",
-                body=f"{title[:60]}"
-            ),
-            topic="all_jobs",
-        )
-        messaging.send(message)
-        print(f"🔔 Notification sent!")
-    except Exception as e:
-        print(f"❌ Notification error: {e}")
-
-def get_category(title, source_url):
-    title_lower = title.lower()
-    if any(w in title_lower for w in ["bank", "ব্যাংক", "banking"]):
-        return "ব্যাংক"
-    elif any(w in title_lower for w in ["ngo", "brac", "grameen", "care", "save the children"]):
-        return "NGO"
-    elif any(w in title_lower for w in ["government", "সরকারি", "govt", "ministry", "মন্ত্রণালয়", "পরিষদ", "বিসিএস", "bcs", "psc"]):
-        return "সরকারি"
-    elif "govt" in source_url or "gov.bd" in source_url:
-        return "সরকারি"
-    elif "bank" in source_url:
-        return "ব্যাংক"
-    elif "ngo" in source_url:
-        return "NGO"
-    else:
-        return "বেসরকারি"
-
-# ========================================
-# RSS Feed গুলো
-# ========================================
+# ─── RSS Feed List ────────────────────────────────────────────────────────────
 RSS_FEEDS = [
-    # সরকারি
-    {
-        "url": "https://ejobsbd.com/category/government-job/feed/",
-        "default_category": "সরকারি",
-        "source": "ejobsbd.com"
-    },
-    {
-        "url": "https://bdjobstoday.info/category/government-jobs/feed/",
-        "default_category": "সরকারি",
-        "source": "bdjobstoday.info"
-    },
-    {
-        "url": "https://www.bdgovtjob.net/feed/",
-        "default_category": "সরকারি",
-        "source": "bdgovtjob.net"
-    },
-    # ব্যাংক
-    {
-        "url": "https://ejobsbd.com/category/bank-job/feed/",
-        "default_category": "ব্যাংক",
-        "source": "ejobsbd.com"
-    },
-    # NGO
-    {
-        "url": "https://ejobsbd.com/category/ngo-job/feed/",
-        "default_category": "NGO",
-        "source": "ejobsbd.com"
-    },
-    # বেসরকারি
-    {
-        "url": "https://ejobsbd.com/category/private-job/feed/",
-        "default_category": "বেসরকারি",
-        "source": "ejobsbd.com"
-    },
-    {
-        "url": "https://bdjobstoday.info/feed/",
-        "default_category": "বেসরকারি",
-        "source": "bdjobstoday.info"
-    },
-    {
-        "url": "https://www.chakribd.com/feed/",
-        "default_category": "বেসরকারি",
-        "source": "chakribd.com"
-    },
-    {
-        "url": "https://jobbd24.com/feed/",
-        "default_category": "বেসরকারি",
-        "source": "jobbd24.com"
-    },
-    {
-        "url": "https://www.bdnewjobs.com/feed/",
-        "default_category": "বেসরকারি",
-        "source": "bdnewjobs.com"
-    },
+    # Government Jobs
+    "https://bdgovtjob.net/feed/",
+    "https://www.bdjobs.com/rss/alljobs.xml",
+    "https://ejobsbd.com/feed/",
+    "https://www.chakri.com.bd/feed/",
+    # Bank Jobs
+    "https://bankjobsbd.com/feed/",
+    "https://www.banknews.com.bd/feed/",
+    # NGO / Development
+    "https://ngojobsbd.com/feed/",
+    "https://devjobsbd.com/feed/",
+    # Private / General
+    "https://jobsbd24.com/feed/",
+    "https://bdcircular.com/feed/",
+    "https://alljobscircularbd.com/feed/",
+    "https://www.jobsandresult.com/feed/",
+    # Defence / Police
+    "https://army.mil.bd/feed/",
+    "https://bddefencejobs.com/feed/",
 ]
 
-# ========================================
-# RSS Feed Scraper
-# ========================================
-def scrape_rss_feed(feed_info):
-    url = feed_info["url"]
-    default_category = feed_info["default_category"]
-    source = feed_info["source"]
-    saved = 0
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; BDJobNewsScraper/1.0)"
+}
 
+# ─── Image Extraction: Multi-Fallback ────────────────────────────────────────
+def extract_image_url(entry, page_url=None):
+    """
+    Try multiple strategies to get an image URL.
+    Returns empty string if none found.
+    """
+
+    # 1. media:content or media:thumbnail (RSS media extension)
+    if hasattr(entry, "media_content") and entry.media_content:
+        for m in entry.media_content:
+            url = m.get("url", "")
+            if url and _is_image_url(url):
+                return url
+
+    if hasattr(entry, "media_thumbnail") and entry.media_thumbnail:
+        url = entry.media_thumbnail[0].get("url", "")
+        if url and _is_image_url(url):
+            return url
+
+    # 2. enclosures (some feeds use this)
+    if hasattr(entry, "enclosures") and entry.enclosures:
+        for enc in entry.enclosures:
+            url = enc.get("href") or enc.get("url", "")
+            if url and _is_image_url(url):
+                return url
+
+    # 3. Parse <img> from entry summary / content
+    html_content = ""
+    if hasattr(entry, "content") and entry.content:
+        html_content = entry.content[0].get("value", "")
+    if not html_content and hasattr(entry, "summary"):
+        html_content = entry.summary or ""
+
+    if html_content:
+        soup = BeautifulSoup(html_content, "html.parser")
+        img = soup.find("img")
+        if img:
+            src = img.get("src") or img.get("data-src") or img.get("data-lazy-src", "")
+            if src and _is_image_url(src):
+                return src
+
+    # 4. Scrape the actual post page (last resort)
+    link = page_url or (entry.get("link") if hasattr(entry, "get") else getattr(entry, "link", None))
+    if link:
+        img_url = _scrape_og_image(link)
+        if img_url:
+            return img_url
+
+    return ""
+
+
+def _is_image_url(url):
+    """Check if URL looks like an image."""
+    return bool(re.search(r"\.(jpg|jpeg|png|webp|gif)(\?.*)?$", url, re.IGNORECASE))
+
+
+def _scrape_og_image(url):
+    """Fetch page and look for og:image or first article image."""
     try:
-        feed = feedparser.parse(url)
+        resp = requests.get(url, headers=HEADERS, timeout=8)
+        if resp.status_code != 200:
+            return ""
+        soup = BeautifulSoup(resp.text, "html.parser")
 
-        if feed.bozo and not feed.entries:
-            print(f"   ⚠️  No data: {source}")
-            return 0
+        # og:image (most reliable)
+        og = soup.find("meta", property="og:image")
+        if og and og.get("content"):
+            return og["content"]
 
-        print(f"   📡 {source}: {len(feed.entries)} entries found")
+        # twitter:image
+        tw = soup.find("meta", attrs={"name": "twitter:image"})
+        if tw and tw.get("content"):
+            return tw["content"]
 
-        for entry in feed.entries[:15]:
-            try:
-                # Title
-                title = entry.get("title", "").strip()
-                if not title or len(title) < 5:
-                    continue
-
-                # Link
-                apply_link = entry.get("link", "")
-
-                # Organization — summary থেকে বের করার চেষ্টা
-                summary = entry.get("summary", "") or entry.get("description", "")
-                organization = "বিভিন্ন প্রতিষ্ঠান"
-
-                # Category
-                category = get_category(title, url)
-                if category == "বেসরকারি":
-                    category = default_category
-
-                # Image
-                image_url = ""
-                if hasattr(entry, "media_content"):
-                    media = entry.get("media_content", [])
-                    if media:
-                        image_url = media[0].get("url", "")
-
-                if not image_url and "enclosures" in entry:
-                    for enc in entry.enclosures:
-                        if "image" in enc.get("type", ""):
-                            image_url = enc.get("href", "")
-                            break
-
-                # Deadline
-                deadline = "N/A"
-                if summary:
-                    import re
-                    date_patterns = [
-                        r'\d{1,2}[/-]\d{1,2}[/-]\d{4}',
-                        r'\d{1,2}\s+\w+\s+\d{4}',
-                        r'Deadline[:\s]+([^\n<]+)',
-                        r'Last Date[:\s]+([^\n<]+)',
-                    ]
-                    for pattern in date_patterns:
-                        match = re.search(pattern, summary, re.IGNORECASE)
-                        if match:
-                            deadline = match.group(0)[:30]
-                            break
-
-                if save_job(title, organization, category, deadline,
-                           image_url, "", apply_link, source):
-                    saved += 1
-
-            except Exception as e:
-                continue
+        # First image inside article / post content
+        article = soup.find("article") or soup.find("div", class_=re.compile(r"entry-content|post-content|content"))
+        if article:
+            img = article.find("img")
+            if img:
+                src = img.get("src") or img.get("data-src", "")
+                if src and _is_image_url(src):
+                    return src
 
     except Exception as e:
-        print(f"   ❌ Error {source}: {str(e)[:60]}")
+        print(f"  [scrape_og_image] Failed for {url}: {e}")
+    return ""
 
-    return saved
 
-# ========================================
-# সব Feed চালান
-# ========================================
-def run_all_scrapers():
-    print(f"\n{'='*50}")
-    print(f"🚀 RSS Scraper: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"{'='*50}")
+# ─── Extract Deadline ─────────────────────────────────────────────────────────
+def extract_deadline(entry):
+    """Try to find application deadline from summary/content."""
+    html = ""
+    if hasattr(entry, "content") and entry.content:
+        html = entry.content[0].get("value", "")
+    if not html and hasattr(entry, "summary"):
+        html = entry.summary or ""
 
-    total = 0
-    for feed in RSS_FEEDS:
-        saved = scrape_rss_feed(feed)
-        total += saved
-        time.sleep(2)
+    text = BeautifulSoup(html, "html.parser").get_text()
 
-    print(f"\n🎉 Total saved: {total} jobs")
-    print(f"✅ Done: {datetime.now().strftime('%H:%M:%S')}")
-    print(f"{'='*50}\n")
+    # Look for date patterns like "Last Date: 25 August 2025" or "Deadline: 2025-08-25"
+    patterns = [
+        r"(?:শেষ তারিখ|আবেদনের শেষ|Last\s*Date|Deadline)[:\s]+([০-৯0-9A-Za-z ,/-]+\d{4})",
+        r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{4})\b",
+        r"\b(\d{1,2}\s+\w+\s+\d{4})\b",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
 
-# ========================================
-# Main
-# ========================================
+    return ""
+
+
+# ─── Scrape and Save ──────────────────────────────────────────────────────────
+def scrape_and_save():
+    saved = 0
+    skipped = 0
+    jobs_ref = db.collection("jobs")
+
+    for feed_url in RSS_FEEDS:
+        print(f"\n📡 Fetching: {feed_url}")
+        try:
+            feed = feedparser.parse(feed_url)
+            entries = feed.entries
+            print(f"  → {len(entries)} entries found")
+        except Exception as e:
+            print(f"  ❌ Failed to parse feed: {e}")
+            continue
+
+        for entry in entries[:10]:  # limit per feed to avoid quota issues
+            try:
+                title = entry.get("title", "").strip()
+                link = entry.get("link", "").strip()
+
+                if not title or not link:
+                    continue
+
+                # Check duplicate by link
+                existing = jobs_ref.where("applyLink", "==", link).limit(1).get()
+                if len(list(existing)) > 0:
+                    skipped += 1
+                    continue
+
+                image_url = extract_image_url(entry, page_url=link)
+                deadline = extract_deadline(entry)
+                published = entry.get("published", "")
+                summary_html = ""
+                if hasattr(entry, "content") and entry.content:
+                    summary_html = entry.content[0].get("value", "")
+                elif hasattr(entry, "summary"):
+                    summary_html = entry.summary or ""
+                summary_text = BeautifulSoup(summary_html, "html.parser").get_text()[:500]
+
+                # Determine category from feed URL
+                category = _guess_category(feed_url, title)
+
+                doc = {
+                    "title": title,
+                    "organization": _extract_org(title),
+                    "category": category,
+                    "deadline": deadline,
+                    "imageUrl": image_url,
+                    "pdfUrl": "",
+                    "applyLink": link,
+                    "source": feed.feed.get("title", feed_url),
+                    "publishDate": published,
+                    "timestamp": firestore.SERVER_TIMESTAMP,
+                    "summary": summary_text,
+                }
+
+                jobs_ref.add(doc)
+                saved += 1
+                print(f"  ✅ Saved: {title[:60]} | image: {'✓' if image_url else '✗'}")
+
+            except Exception as e:
+                print(f"  ⚠️  Entry error: {e}")
+
+        time.sleep(1)  # polite delay between feeds
+
+    print(f"\n🎉 Done! Saved: {saved} | Skipped (duplicate): {skipped}")
+
+
+def _guess_category(feed_url, title):
+    url_lower = feed_url.lower()
+    title_lower = title.lower()
+    if "bank" in url_lower or "bank" in title_lower:
+        return "Bank Job"
+    if "ngo" in url_lower or "ngo" in title_lower:
+        return "NGO Job"
+    if "defence" in url_lower or "army" in url_lower or "police" in title_lower:
+        return "Defence"
+    if "govt" in url_lower or "government" in title_lower or "সরকারি" in title_lower:
+        return "Government"
+    return "Private"
+
+
+def _extract_org(title):
+    """Simple heuristic: take first part before common separators."""
+    for sep in [" – ", " - ", " | ", " :: "]:
+        if sep in title:
+            return title.split(sep)[0].strip()
+    return title[:50]
+
+
+# ─── Entry Point ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    run_all_scrapers()
-
-    schedule.every(6).hours.do(run_all_scrapers)
-    print("⏰ Scheduler running — প্রতি ৬ ঘণ্টায় update হবে...")
-
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
+    print("🚀 BD Job News Scraper starting...")
+    scrape_and_save()
