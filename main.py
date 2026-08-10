@@ -6,6 +6,8 @@ import time
 import json
 import os
 import re
+import requests
+from bs4 import BeautifulSoup
 from datetime import datetime
 
 # Firebase Setup
@@ -20,6 +22,8 @@ firebase_admin.initialize_app(cred)
 db = firestore.client()
 print("✅ Firebase connected!")
 
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; BDJobNewsScraper/1.0)"}
+
 def generate_id(title):
     return hashlib.md5(title.encode('utf-8')).hexdigest()
 
@@ -31,31 +35,27 @@ def is_duplicate(job_id):
         return False
 
 def extract_image_from_entry(entry):
-    """
-    RSS entry থেকে image URL বের করার ৪টা fallback method
-    """
-    image_url = ""
-
-    # Method 1: media:content বা media:thumbnail
+    # Method 1: media:content
     if hasattr(entry, "media_content") and entry.media_content:
-        image_url = entry.media_content[0].get("url", "")
-        if image_url:
-            return image_url
+        url = entry.media_content[0].get("url", "")
+        if url:
+            return url
 
+    # Method 2: media:thumbnail
     if hasattr(entry, "media_thumbnail") and entry.media_thumbnail:
-        image_url = entry.media_thumbnail[0].get("url", "")
-        if image_url:
-            return image_url
+        url = entry.media_thumbnail[0].get("url", "")
+        if url:
+            return url
 
-    # Method 2: enclosure (podcast/image attachment)
+    # Method 3: enclosure
     if hasattr(entry, "enclosures") and entry.enclosures:
         for enc in entry.enclosures:
             if enc.get("type", "").startswith("image"):
-                image_url = enc.get("href", "") or enc.get("url", "")
-                if image_url:
-                    return image_url
+                url = enc.get("href", "") or enc.get("url", "")
+                if url:
+                    return url
 
-    # Method 3: summary বা content এর HTML থেকে <img> tag extract
+    # Method 4: summary/content থেকে <img> tag
     html_content = ""
     if hasattr(entry, "content") and entry.content:
         html_content = entry.content[0].get("value", "")
@@ -65,18 +65,38 @@ def extract_image_from_entry(entry):
     if html_content:
         img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', html_content)
         if img_match:
-            image_url = img_match.group(1)
-            # data:image বা ছোট icon বাদ দাও
-            if image_url and not image_url.startswith("data:") and len(image_url) > 10:
-                return image_url
+            url = img_match.group(1)
+            if url and not url.startswith("data:") and len(url) > 10:
+                return url
 
-    # Method 4: links এর মধ্যে image type খোঁজো
-    if hasattr(entry, "links"):
-        for link in entry.links:
-            if link.get("type", "").startswith("image"):
-                image_url = link.get("href", "")
-                if image_url:
-                    return image_url
+    # Method 5: post page থেকে og:image scrape (last resort)
+    link = getattr(entry, "link", None)
+    if link:
+        try:
+            resp = requests.get(link, headers=HEADERS, timeout=8)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, "html.parser")
+
+                # og:image
+                og = soup.find("meta", property="og:image")
+                if og and og.get("content"):
+                    return og["content"]
+
+                # twitter:image
+                tw = soup.find("meta", attrs={"name": "twitter:image"})
+                if tw and tw.get("content"):
+                    return tw["content"]
+
+                # article এর প্রথম img
+                article = soup.find("article") or soup.find("div", class_=re.compile(r"entry-content|post-content|content"))
+                if article:
+                    img = article.find("img")
+                    if img:
+                        src = img.get("src") or img.get("data-src", "")
+                        if src and not src.startswith("data:"):
+                            return src
+        except Exception as e:
+            print(f"  [og:image] Failed: {e}")
 
     return ""
 
@@ -162,7 +182,6 @@ def scrape_rss_feeds():
                 apply_link = entry.get("link", "")
                 category = get_category(title, feed_info["default_category"])
 
-                # ✅ নতুন image extract function
                 image_url = extract_image_from_entry(entry)
                 if image_url:
                     img_found += 1
