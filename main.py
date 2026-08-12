@@ -111,7 +111,7 @@ JSON ফরম্যাট:
                 "model": GROQ_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.2,
-                "max_tokens": 200,
+                "max_tokens": 260,
             },
             timeout=15,
         )
@@ -302,7 +302,9 @@ def scrape_rss_feeds():
         try:
             feed = feedparser.parse(feed_info["url"])
             if not feed.entries:
-                print(f"   ⚠️  No data: {feed_info['source']}")
+                bozo_msg = getattr(feed, "bozo_exception", "")
+                status = getattr(feed, "status", "unknown")
+                print(f"   ⚠️  No data: {feed_info['source']} (HTTP status: {status}, error: {str(bozo_msg)[:100]})")
                 continue
             print(f"   📡 {feed_info['source']}: {len(feed.entries)} entries")
             for entry in feed.entries[:15]:
