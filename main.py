@@ -69,7 +69,7 @@ def fetch_full_article_text(link):
         if article:
             text = article.get_text(separator=" ", strip=True)
             print(f"  [page-fetch] Got {len(text)} chars from page")
-            return text[:1200]
+            return text[:800]
         else:
             print(f"  [page-fetch] No article/content div found on page")
     except Exception as e:
@@ -111,7 +111,7 @@ JSON ফরম্যাট:
                 "model": GROQ_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.2,
-                "max_tokens": 300,
+                "max_tokens": 200,
             },
             timeout=15,
         )
@@ -334,7 +334,7 @@ def scrape_rss_feeds():
                     combined_text = title
 
                 extracted = extract_job_details_with_groq(title, combined_text)
-                time.sleep(3)  # Groq free-tier rate limit (RPM/TPM) respect korar jonno
+                time.sleep(12)  # Groq free-tier TPM limit respect korar jonno (বেশি delay lagbe)
 
                 if save_job(
                     title=title,
