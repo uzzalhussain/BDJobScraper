@@ -49,6 +49,31 @@ def clean_html_text(html_content):
         return html_content[:1000]
 
 
+def fetch_full_article_text(link):
+    """
+    RSS summary onek somoy shudhu chhoto teaser hoy (asol
+    organization/deadline thakena). Tai actual post page theke
+    full article text fetch kore Groq-ke deই, jate thik moto
+    extract korte pare.
+    """
+    if not link:
+        return ""
+    try:
+        resp = requests.get(link, headers=HEADERS, timeout=10)
+        if resp.status_code != 200:
+            return ""
+        soup = BeautifulSoup(resp.text, "html.parser")
+        article = soup.find("article") or soup.find(
+            "div", class_=re.compile(r"entry-content|post-content|content")
+        )
+        if article:
+            text = article.get_text(separator=" ", strip=True)
+            return text[:2500]
+    except Exception as e:
+        print(f"  [page-fetch] Failed: {str(e)[:60]}")
+    return ""
+
+
 def extract_job_details_with_groq(title, summary_text):
     """
     Groq AI diye title + summary theke organization, deadline,
@@ -293,11 +318,18 @@ def scrape_rss_feeds():
                 if image_url:
                     img_found += 1
 
-                # Summary theke plain text ber kore Groq-ke deই
+                # Summary shudhu chhoto teaser hoy, tai actual page
+                # theke full text-o fetch kori Groq-ke bhalo context
+                # deওয়ার jonno
                 raw_summary = entry.get("summary", "") or ""
                 summary_text = clean_html_text(raw_summary)
+                full_page_text = fetch_full_article_text(apply_link)
 
-                extracted = extract_job_details_with_groq(title, summary_text)
+                combined_text = (summary_text + " " + full_page_text).strip()
+                if not combined_text:
+                    combined_text = title
+
+                extracted = extract_job_details_with_groq(title, combined_text)
                 time.sleep(0.3)  # Groq free-tier rate limit respect korar jonno
 
                 if save_job(
