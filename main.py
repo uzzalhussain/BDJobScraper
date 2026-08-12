@@ -160,6 +160,9 @@ def fetch_feed(url):
     except Exception as e:
         print(f"  [feed-fetch] Failed: {str(e)[:80]}")
         return feedparser.parse("")
+
+
+def generate_id(title):
     return hashlib.md5(title.encode('utf-8')).hexdigest()
 
 
