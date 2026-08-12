@@ -143,7 +143,23 @@ JSON ফরম্যাট:
 
 # ---------------- Duplicate / ID helpers ----------------
 
-def generate_id(title):
+def fetch_feed(url):
+    """
+    feedparser sরাসরি URL fetch korle kichu site (jemon jobbd24.com) bot
+    mone kore block kore dey (403), ar kichu feed-e URL-er vitore
+    unescaped '&' thakle XML malformed hoye jay. Ei function ta
+    browser-er moto header pathay ar '&' fix kore deওয়ার por
+    feedparser-ke parse korte dey.
+    """
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        text = resp.content.decode("utf-8", errors="ignore")
+        # Bare '&' (jeta already kono valid entity-r part na) escape kore dey
+        text = re.sub(r"&(?!amp;|lt;|gt;|quot;|apos;|#\d+;)", "&amp;", text)
+        return feedparser.parse(text)
+    except Exception as e:
+        print(f"  [feed-fetch] Failed: {str(e)[:80]}")
+        return feedparser.parse("")
     return hashlib.md5(title.encode('utf-8')).hexdigest()
 
 
@@ -285,10 +301,6 @@ def get_category(title, default):
 RSS_FEEDS = [
     {"url": "https://www.bdgovtjob.net/feed/", "default_category": "সরকারি", "source": "bdgovtjob.net"},
     {"url": "https://ejobsbd.com/feed/", "default_category": "বেসরকারি", "source": "ejobsbd.com"},
-    {"url": "https://ejobsbd.com/category/government-job/feed/", "default_category": "সরকারি", "source": "ejobsbd.com"},
-    {"url": "https://ejobsbd.com/category/bank-job/feed/", "default_category": "ব্যাংক", "source": "ejobsbd.com"},
-    {"url": "https://ejobsbd.com/category/ngo-job/feed/", "default_category": "NGO", "source": "ejobsbd.com"},
-    {"url": "https://ejobsbd.com/category/private-job/feed/", "default_category": "বেসরকারি", "source": "ejobsbd.com"},
     {"url": "https://bdjobstoday.info/feed/", "default_category": "বেসরকারি", "source": "bdjobstoday.info"},
     {"url": "https://jobbd24.com/feed/", "default_category": "বেসরকারি", "source": "jobbd24.com"},
 ]
@@ -300,7 +312,7 @@ def scrape_rss_feeds():
     img_found = 0
     for feed_info in RSS_FEEDS:
         try:
-            feed = feedparser.parse(feed_info["url"])
+            feed = fetch_feed(feed_info["url"])
             if not feed.entries:
                 bozo_msg = getattr(feed, "bozo_exception", "")
                 status = getattr(feed, "status", "unknown")
