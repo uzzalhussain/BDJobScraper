@@ -19,7 +19,8 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
         
-      - name: Run scraper
+    - name: Run scraper
         env:
           FIREBASE_KEY: ${{ secrets.FIREBASE_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: python main.py
