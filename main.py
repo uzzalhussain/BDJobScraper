@@ -69,7 +69,7 @@ def fetch_full_article_text(link):
         if article:
             text = article.get_text(separator=" ", strip=True)
             print(f"  [page-fetch] Got {len(text)} chars from page")
-            return text[:2500]
+            return text[:1200]
         else:
             print(f"  [page-fetch] No article/content div found on page")
     except Exception as e:
@@ -334,7 +334,7 @@ def scrape_rss_feeds():
                     combined_text = title
 
                 extracted = extract_job_details_with_groq(title, combined_text)
-                time.sleep(0.3)  # Groq free-tier rate limit respect korar jonno
+                time.sleep(3)  # Groq free-tier rate limit (RPM/TPM) respect korar jonno
 
                 if save_job(
                     title=title,
