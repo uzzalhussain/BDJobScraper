@@ -24,8 +24,99 @@ print("✅ Firebase connected!")
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; BDJobNewsScraper/1.0)"}
 
+# ---------------- Groq Setup ----------------
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama-3.1-8b-instant"
+
+DEFAULT_EXTRACTION = {
+    "organization": "বিভিন্ন প্রতিষ্ঠান",
+    "deadline": "N/A",
+    "positionCategory": "",
+    "numberOfPosts": "",
+}
+
+
+def clean_html_text(html_content):
+    """HTML theke plain text ber kore, Groq-e pathanor jonno"""
+    if not html_content:
+        return ""
+    try:
+        soup = BeautifulSoup(html_content, "html.parser")
+        text = soup.get_text(separator=" ", strip=True)
+        return text[:1000]
+    except Exception:
+        return html_content[:1000]
+
+
+def extract_job_details_with_groq(title, summary_text):
+    """
+    Groq AI diye title + summary theke organization, deadline,
+    positionCategory, numberOfPosts extract kore.
+    Groq key na thakle ba error hole default value return kore.
+    """
+    if not GROQ_API_KEY:
+        return DEFAULT_EXTRACTION.copy()
+
+    prompt = f"""নিচের বাংলাদেশি চাকরির বিজ্ঞপ্তির শিরোনাম ও বিবরণ পড়ে তথ্য বের করো।
+শুধুমাত্র নিচের JSON ফরম্যাটে উত্তর দাও, অন্য কোনো লেখা, ব্যাখ্যা বা মার্কডাউন যোগ কোরো না।
+
+শিরোনাম: {title}
+বিবরণ: {summary_text}
+
+JSON ফরম্যাট:
+{{
+  "organization": "প্রতিষ্ঠান/কোম্পানির নাম, না পেলে খালি স্ট্রিং",
+  "deadline": "আবেদনের শেষ তারিখ (যেমন: ৩০ আগস্ট ২০২৬), না পেলে খালি স্ট্রিং",
+  "positionCategory": "পদের নাম বা ক্যাটাগরি (যেমন: সহকারী পরিচালক, অফিসার), না পেলে খালি স্ট্রিং",
+  "numberOfPosts": "মোট পদ সংখ্যা (যেমন: ৭২ বা অনির্ধারিত), না পেলে খালি স্ট্রিং"
+}}"""
+
+    try:
+        resp = requests.post(
+            GROQ_URL,
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": GROQ_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.2,
+                "max_tokens": 300,
+            },
+            timeout=15,
+        )
+
+        if resp.status_code != 200:
+            print(f"  [Groq] API error {resp.status_code}: {resp.text[:100]}")
+            return DEFAULT_EXTRACTION.copy()
+
+        content = resp.json()["choices"][0]["message"]["content"].strip()
+        # Kono somoy Groq ```json ... ``` wrap kore dey, seta clean kori
+        content = re.sub(r"^```(?:json)?|```$", "", content, flags=re.MULTILINE).strip()
+
+        data = json.loads(content)
+        return {
+            "organization": (data.get("organization") or "").strip() or DEFAULT_EXTRACTION["organization"],
+            "deadline": (data.get("deadline") or "").strip() or DEFAULT_EXTRACTION["deadline"],
+            "positionCategory": (data.get("positionCategory") or "").strip(),
+            "numberOfPosts": (data.get("numberOfPosts") or "").strip(),
+        }
+
+    except json.JSONDecodeError:
+        print(f"  [Groq] JSON parse failed for: {title[:40]}")
+        return DEFAULT_EXTRACTION.copy()
+    except Exception as e:
+        print(f"  [Groq] Extraction failed: {str(e)[:80]}")
+        return DEFAULT_EXTRACTION.copy()
+
+
+# ---------------- Duplicate / ID helpers ----------------
+
 def generate_id(title):
     return hashlib.md5(title.encode('utf-8')).hexdigest()
+
 
 def is_duplicate(job_id):
     try:
@@ -33,6 +124,9 @@ def is_duplicate(job_id):
         return doc.exists
     except:
         return False
+
+
+# ---------------- Image extraction (5-layer fallback) ----------------
 
 def extract_image_from_entry(entry):
     # Method 1: media:content
@@ -55,7 +149,7 @@ def extract_image_from_entry(entry):
                 if url:
                     return url
 
-    # Method 4: summary/content থেকে <img> tag
+    # Method 4: summary/content theke <img> tag
     html_content = ""
     if hasattr(entry, "content") and entry.content:
         html_content = entry.content[0].get("value", "")
@@ -69,7 +163,7 @@ def extract_image_from_entry(entry):
             if url and not url.startswith("data:") and len(url) > 10:
                 return url
 
-    # Method 5: post page থেকে og:image scrape (last resort)
+    # Method 5: post page theke og:image scrape (last resort)
     link = getattr(entry, "link", None)
     if link:
         try:
@@ -77,17 +171,14 @@ def extract_image_from_entry(entry):
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, "html.parser")
 
-                # og:image
                 og = soup.find("meta", property="og:image")
                 if og and og.get("content"):
                     return og["content"]
 
-                # twitter:image
                 tw = soup.find("meta", attrs={"name": "twitter:image"})
                 if tw and tw.get("content"):
                     return tw["content"]
 
-                # article এর প্রথম img
                 article = soup.find("article") or soup.find("div", class_=re.compile(r"entry-content|post-content|content"))
                 if article:
                     img = article.find("img")
@@ -100,7 +191,11 @@ def extract_image_from_entry(entry):
 
     return ""
 
-def save_job(title, organization, category, deadline, image_url="", pdf_url="", apply_link="", source=""):
+
+# ---------------- Save & Notify ----------------
+
+def save_job(title, organization, category, deadline, image_url="", pdf_url="",
+             apply_link="", source="", position_category="", number_of_posts=""):
     if not title or len(title) < 5:
         return False
     job_id = generate_id(title)
@@ -116,6 +211,8 @@ def save_job(title, organization, category, deadline, image_url="", pdf_url="", 
         "pdfUrl": pdf_url,
         "applyLink": apply_link,
         "source": source,
+        "positionCategory": position_category,
+        "numberOfPosts": number_of_posts,
         "publishDate": datetime.now().strftime("%Y-%m-%d"),
         "timestamp": int(datetime.now().timestamp()),
     }
@@ -128,6 +225,7 @@ def save_job(title, organization, category, deadline, image_url="", pdf_url="", 
     except Exception as e:
         print(f"❌ Save error: {e}")
         return False
+
 
 def send_notification(title):
     try:
@@ -143,6 +241,7 @@ def send_notification(title):
     except Exception as e:
         print(f"❌ Notification error: {e}")
 
+
 def get_category(title, default):
     t = title.lower()
     if any(w in t for w in ["bank", "ব্যাংক", "banking"]):
@@ -152,6 +251,7 @@ def get_category(title, default):
     elif any(w in t for w in ["সরকারি", "govt", "ministry", "মন্ত্রণালয়", "অধিদপ্তর", "bcs", "psc", "পুলিশ"]):
         return "সরকারি"
     return default
+
 
 RSS_FEEDS = [
     {"url": "https://www.bdgovtjob.net/feed/", "default_category": "সরকারি", "source": "bdgovtjob.net"},
@@ -163,6 +263,7 @@ RSS_FEEDS = [
     {"url": "https://bdjobstoday.info/feed/", "default_category": "বেসরকারি", "source": "bdjobstoday.info"},
     {"url": "https://jobbd24.com/feed/", "default_category": "বেসরকারি", "source": "jobbd24.com"},
 ]
+
 
 def scrape_rss_feeds():
     print("\n📡 RSS Feed Scraping...")
@@ -179,6 +280,12 @@ def scrape_rss_feeds():
                 title = entry.get("title", "").strip()
                 if not title or len(title) < 5:
                     continue
+
+                job_id = generate_id(title)
+                if is_duplicate(job_id):
+                    print(f"⏭️  Already exists: {title[:40]}")
+                    continue
+
                 apply_link = entry.get("link", "")
                 category = get_category(title, feed_info["default_category"])
 
@@ -186,13 +293,32 @@ def scrape_rss_feeds():
                 if image_url:
                     img_found += 1
 
-                if save_job(title, "বিভিন্ন প্রতিষ্ঠান", category, "N/A", image_url, "", apply_link, feed_info["source"]):
+                # Summary theke plain text ber kore Groq-ke deই
+                raw_summary = entry.get("summary", "") or ""
+                summary_text = clean_html_text(raw_summary)
+
+                extracted = extract_job_details_with_groq(title, summary_text)
+                time.sleep(0.3)  # Groq free-tier rate limit respect korar jonno
+
+                if save_job(
+                    title=title,
+                    organization=extracted["organization"],
+                    category=category,
+                    deadline=extracted["deadline"],
+                    image_url=image_url,
+                    pdf_url="",
+                    apply_link=apply_link,
+                    source=feed_info["source"],
+                    position_category=extracted["positionCategory"],
+                    number_of_posts=extracted["numberOfPosts"],
+                ):
                     total += 1
         except Exception as e:
             print(f"   ❌ {feed_info['source']}: {str(e)[:50]}")
         time.sleep(1)
     print(f"   ✅ Total saved: {total} | 🖼️ With image: {img_found}")
     return total
+
 
 def run_all_scrapers():
     print(f"\n{'='*50}")
@@ -201,6 +327,7 @@ def run_all_scrapers():
     total = scrape_rss_feeds()
     print(f"\n🎉 Done! Total: {total} jobs saved!")
     print(f"{'='*50}\n")
+
 
 if __name__ == "__main__":
     run_all_scrapers()
