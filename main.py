@@ -68,7 +68,10 @@ def fetch_full_article_text(link):
         )
         if article:
             text = article.get_text(separator=" ", strip=True)
+            print(f"  [page-fetch] Got {len(text)} chars from page")
             return text[:2500]
+        else:
+            print(f"  [page-fetch] No article/content div found on page")
     except Exception as e:
         print(f"  [page-fetch] Failed: {str(e)[:60]}")
     return ""
@@ -118,6 +121,7 @@ JSON ফরম্যাট:
             return DEFAULT_EXTRACTION.copy()
 
         content = resp.json()["choices"][0]["message"]["content"].strip()
+        print(f"  [Groq] Raw response: {content[:200]}")
         # Kono somoy Groq ```json ... ``` wrap kore dey, seta clean kori
         content = re.sub(r"^```(?:json)?|```$", "", content, flags=re.MULTILINE).strip()
 
